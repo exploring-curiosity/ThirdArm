@@ -29,50 +29,66 @@ async def connect():
 
     return await RobotClient.at_address(_require_env('VIAM_MACHINE_ADDRESS'), opts)
 
+# The arm-position-saver switch exposes three positions:
+#   0 = idle, 1 = update config (overwrites the saved pose!), 2 = go to saved pose.
+# Only ever send 2 — sending 1 would clobber the pose saved in the Viam app.
+GO_TO = 2
+
+
+async def goto_saved_pose(machine, name):
+    """Drive an arm-position-saver switch to its saved pose.
+
+    set_position(2) blocks until the arm finishes moving, and the module
+    returns itself to idle (0) on completion.
+    """
+    switch = Switch.from_robot(machine, name)
+    print(f"moving to '{name}'...")
+    await switch.set_position(GO_TO)
+    print(f"reached '{name}'.")
+
+
 async def main():
     async with await connect() as machine:
-        print('Resources:')
-        print(machine.resource_names)
-        
-        # home-pose
-        home_pose = Switch.from_robot(machine, "home-pose")
-        home_pose_return_value = await home_pose.get_position()
-        print(f"home-pose get_position return value: {home_pose_return_value}")
-
-        # arm
         arm = Arm.from_robot(machine, "arm")
-        arm_return_value = await arm.get_end_position()
-        print(f"arm get_end_position return value: {arm_return_value}")
-
-        # cam
-        cam = Camera.from_robot(machine, "cam")
-        cam_return_value = await cam.get_images()
-        print(f"cam get_images return value: {cam_return_value}")
-
-        # gripper
         gripper = Gripper.from_robot(machine, "gripper")
-        gripper_return_value = await gripper.is_moving()
-        print(f"gripper is_moving return value: {gripper_return_value}")
 
-        # table
-        table = Gripper.from_robot(machine, "table")
-        table_return_value = await table.is_moving()
-        print(f"table is_moving return value: {table_return_value}")
+        # Start from a known state: open gripper, arm at start-position.
+        print("opening gripper...")
+        await gripper.open()
+        await goto_saved_pose(machine, "start-position")
 
-        # wall-front
-        wall_front = Gripper.from_robot(machine, "wall-front")
-        wall_front_return_value = await wall_front.is_moving()
-        print(f"wall-front is_moving return value: {wall_front_return_value}")
+        # Reach the cuboid and settle before closing on it.
+        await goto_saved_pose(machine, "reach-cuboid")
+        pose = await arm.get_end_position()
+        print(f"  pose at reach-cuboid: x={pose.x:.1f} y={pose.y:.1f} z={pose.z:.1f}")
 
-        # wall-side
-        wall_side = Gripper.from_robot(machine, "wall-side")
-        wall_side_return_value = await wall_side.is_moving()
-        print(f"wall-side is_moving return value: {wall_side_return_value}")
+        print("holding for 2s...")
+        await asyncio.sleep(1)
 
-        # ceiling
-        ceiling = Gripper.from_robot(machine, "ceiling")
-        ceiling_return_value = await ceiling.is_moving()
-        print(f"ceiling is_moving return value: {ceiling_return_value}")
+        # Pick up the cuboid.
+        print("grabbing...")
+        grabbed = await gripper.grab()
+        if not grabbed:
+            print("  WARNING: grab() reported nothing grasped — continuing anyway.")
+        else:
+            print("  grabbed.")
+
+        # Carry it back to start.
+        await goto_saved_pose(machine, "start-position")
+
+        # Return it and let go.
+        await goto_saved_pose(machine, "reach-cuboid")
+        print("releasing...")
+        await asyncio.sleep(1)
+        await gripper.open()
+        print("  released.")
+
+        # Retreat to start.
+        await goto_saved_pose(machine, "start-position")
+
+        pose = await arm.get_end_position()
+        print(f"  pose back at start-position: x={pose.x:.1f} y={pose.y:.1f} z={pose.z:.1f}")
+
 
 if __name__ == '__main__':
     asyncio.run(main())
