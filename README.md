@@ -36,6 +36,7 @@ python multi_pick.py blue                   # pick it up and drop it in the box
 | script | what it does |
 |---|---|
 | `multi_pick.py` | **The main one.** Pick any coloured object, drop it in the green box. |
+| `multi_pick_box.py` | Same as `multi_pick.py`, plus excludes objects already sitting in the green box. |
 | `viewer.py` | Live camera feed with detections and world coordinates. Never moves the arm. |
 | `tutorial.py` | The original walkthrough: saved poses, gripper, live feed. |
 | `seg_pick.py` | Pick using the `det-to-segment` 3D segmenter. Superseded by `multi_pick.py`. |
@@ -65,6 +66,19 @@ then hover → descend → grab → lift → carry → release.
 `--dry-run` and `--locate` look from wherever the arm currently is. A full run
 sends it to `top-pose` first. If a dry run reports nothing detected, check the
 arm is actually at `top-pose`.
+
+### multi_pick_box.py
+
+```
+python multi_pick_box.py [--list|--locate|--dry-run] [--slow] [--no-drop] <colour>
+```
+
+Identical to `multi_pick.py`, with one addition: the green drop box is located
+*before* the target colour, and any candidate detection that falls inside it is
+excluded. Without this, a colour detector can still fire on an object already
+dropped in the box (seen through the open top), and the arm would try to pick
+it up again. The exclusion is skipped under `--no-drop`, since the box position
+is never located in that mode.
 
 ### viewer.py
 
@@ -101,6 +115,7 @@ was captured at. Every locate transforms to world coordinates immediately.
 | `WORKING_GRASP_Z` | `seg_pick.py` | 28.36 | Hand-verified `reach-cuboid` grasp height |
 | `APPROACH_CLEARANCE_MM` | `seg_pick.py` | 120 | Hover height above the object |
 | `DROP_CLEARANCE_MM` | `multi_pick.py` | 90 | Release height above the box rim |
+| `BOX_EXCLUSION_RADIUS_MM` | `multi_pick_box.py` | 90 | Half-width of the drop-box exclusion zone, mm (unmeasured, tune as needed) |
 | `WORKSPACE` | `multi_pick.py` | x 200-700, y ±200, z 20-150 | Valid object positions, mm |
 | `MIN/MAX_BOX_PX` | `multi_pick.py` | 25, 110 | Plausible object size on screen |
 | `STEP_MM` / `STEP_PAUSE_S` | `slow_pick.py` | 15, 0.6 | Stepped-mode granularity |
