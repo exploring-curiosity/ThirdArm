@@ -356,8 +356,8 @@ async def main(argv):
             return
 
         if colour is None:
-            print(f"usage: multi_pick.py [--list|--locate|--dry-run|--slow] "
-                  f"<{('|'.join(sorted(DETECTORS)))}>")
+            print(f"usage: multi_pick.py [--list|--locate|--dry-run] "
+                  f"[--slow] [--no-drop] <{('|'.join(sorted(DETECTORS)))}>")
             print("  --slow     use the old stepped crawl instead of smooth motion")
             print("  --no-drop  lift and hold instead of dropping in the green box")
             return
