@@ -1,5 +1,28 @@
+# Robot control — the original pipeline.
 viam-sdk
 python-dotenv
 opencv-python
 numpy
+# macOS only: used to list camera device names when picking the overhead cam.
 pyobjc-framework-AVFoundation ; sys_platform == 'darwin'
+
+# Perception and planning (added 2026-09-19).
+# Versions pinned to what was verified working on an Apple Silicon M5 Pro with
+# MPS; torch 2.14 is the first that ran SAM 3 and Qwen3-VL here without issue.
+torch==2.14.0
+torchvision==0.29.0
+transformers==5.17.0
+accelerate==1.15.0          # required for device_map when loading the VLM
+timm==1.0.29
+huggingface-hub==1.32.0
+pillow==12.3.0
+
+# SAM 3 — segmentation. Needs three local patches on Apple Silicon; see
+# docs/sam3-install-notes.md. Do not reinstall without re-applying them.
+sam3==0.1.4
+scipy==1.17.1               # CPU fallback for the CUDA-only triton EDT kernel
+psutil==7.2.2               # imported by sam3's video predictor
+# Without this SAM 3 warns "No module named 'skimage'" and SKIPS its mask
+# post-processing, which removes small holes and specks. Those artefacts
+# change a mask's minimum-width axis, so the computed grasp angle moves.
+scikit-image==0.26.0

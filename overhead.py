@@ -56,6 +56,8 @@ from viam.media.video import CameraMimeType
 from tutorial import connect, goto_saved_pose, _decode_depth
 from live3d import COLOURS, find_blobs, depth_pump, pose_pump
 
+# Pairs collected so far, so a dropped connection does not lose them.
+PAIRS_PATH = Path(__file__).with_name("overhead_pairs.json")
 CALIB_PATH = Path(__file__).with_name("overhead_calib.json")
 
 # Hand-measured mounting pose, relative to the arm. Used only to sanity-check a
@@ -74,6 +76,37 @@ WORK_W, WORK_H = 960, 540
 # coloured distractions (the green box, clothing, furniture).
 OH_MIN_AREA, OH_MAX_AREA = 150, 40000
 OH_MIN_SIDE, OH_MAX_SIDE = 10, 260
+
+# A blob wider or taller than this is a CONTAINER (a drop box), not something
+# to pick or to track for motion.
+#
+# By size, not colour: there are now two drop boxes, a green rectangular one
+# and a blue circular one, and more may be added in any colour. Size is what
+# actually distinguishes them.
+#
+# MEASURED in the overhead view: the orange block is 42x61 px, the green box
+# 118x199, the blue box 189x182. 100 px sits clear of the block and below
+# both boxes -- more than 2x the block's larger side, and well under the
+# smaller box dimension.
+OH_CONTAINER_SIDE = 100
+
+# Minimum fraction of its bounding box a real object fills.
+#
+# A drop box seen from above is mostly a RIM: its interior is shadow or table,
+# so the detected component is a thin outline that fills very little of its
+# bounding box, and it breaks into slivers whenever the arm crosses it. Those
+# slivers are small enough to pass OH_CONTAINER_SIDE and were reported as
+# objects moving.
+#
+# MEASURED in the overhead view: the orange block fills 0.61 of its bbox and
+# the blue box 0.77 (both solid from above), while green rim fragments fill
+# 0.15 and 0.38. 0.45 sits clear of both real objects and above every
+# fragment seen.
+OH_MIN_FILL = 0.45
+
+# Kernel that rejoins fragments of one box. Must exceed the widest gap the
+# arm opens across a rim; well below the clearance between separate objects.
+OH_MERGE_PX = 25
 
 # Only this fraction of the frame, measured from the top, is off-table room:
 # people, laptops, the wall. Skin tone in particular reads as orange in HSV and
@@ -150,6 +183,14 @@ def grab(cap):
     return cv2.resize(frame, (WORK_W, WORK_H))
 
 
+# One cv2.VideoCapture, several readers. The web service now has three tasks
+# that want overhead frames (the motion watch, the pick's own move signal and
+# the renderer), and cv2 capture objects are not safe to read from more than
+# one thread at a time: concurrent grabs interleave buffer reads and return
+# torn or duplicated frames.
+_GRAB_LOCK = asyncio.Lock()
+
+
 async def grab_async(cap):
     """grab() on a worker thread, so the event loop keeps running.
 
@@ -158,15 +199,24 @@ async def grab_async(cap):
     enough that the Viam connection's keepalives never went out — the gRPC
     channel dropped before the arm had even moved, and the run hung with no
     error beyond "channel closed".
+
+    Serialised: callers queue rather than racing. Each still waits only for
+    one capture, and a torn frame would be far more expensive than the wait.
     """
-    return await asyncio.to_thread(grab, cap)
+    async with _GRAB_LOCK:
+        return await asyncio.to_thread(grab, cap)
 
 
-def overhead_blobs(hsv, colour):
+def overhead_blobs(hsv, colour, containers=False):
     """Colour blobs in the overhead view, with its own size limits.
 
     live3d.find_blobs is calibrated for the wrist camera at survey range. This
     camera is further away and wider, so its plausible sizes are different.
+
+    Containers (drop boxes) are excluded by default and separated by SIZE,
+    not colour: a blob with any side over OH_CONTAINER_SIDE is a box. Pass
+    containers=True to get those instead, which is how the boxes themselves
+    can be found.
     """
     lo, hi, _ = COLOURS[colour]
     mask = cv2.inRange(hsv, lo, hi)
@@ -175,6 +225,12 @@ def overhead_blobs(hsv, colour):
     mask[:int(mask.shape[0] * ROI_TOP_FRAC), :] = 0
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    # Rejoin a box that broke into pieces. A drop box seen from above is a
+    # rim, and the arm crossing it splits that rim into slivers small enough
+    # to look like objects. A wide close merges them back into one blob, so
+    # the box is one large container again rather than several small "objects".
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
+                            np.ones((OH_MERGE_PX, OH_MERGE_PX), np.uint8))
     n, _, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
     out = []
     for k in range(1, n):
@@ -183,6 +239,14 @@ def overhead_blobs(hsv, colour):
             continue
         if not (OH_MIN_SIDE < w < OH_MAX_SIDE
                 and OH_MIN_SIDE < h < OH_MAX_SIDE):
+            continue
+        # A hollow outline is not an object. Checked before the container
+        # split so a fragmented box is discarded outright rather than being
+        # reclassified as something pickable.
+        if area < OH_MIN_FILL * w * h:
+            continue
+        is_container = max(w, h) >= OH_CONTAINER_SIDE
+        if is_container != containers:
             continue
         out.append((int(centroids[k][0]), int(centroids[k][1]), x, y, w, h))
     return out
@@ -317,6 +381,18 @@ async def calibrate(colour="orange", want=6, index=None):
                 print("The arm will not move. Ctrl-C to stop early.\n")
 
                 pairs = []
+                if PAIRS_PATH.exists():
+                    try:
+                        saved = json.loads(PAIRS_PATH.read_text())
+                        if saved.get("colour") == colour:
+                            pairs = [tuple(p) for p in saved["pairs"]]
+                            print(f"  resuming with {len(pairs)} pair(s) "
+                                  f"from an earlier session")
+                            for i, (cx, cy, wx, wy) in enumerate(pairs, 1):
+                                print(f"  [{i}/{want}] px({cx:4d},{cy:4d}) "
+                                      f"-> world({wx:7.1f},{wy:7.1f})")
+                    except Exception:                       # noqa: BLE001
+                        pairs = []
                 last = None
                 stable_since = None
 
@@ -368,6 +444,13 @@ async def calibrate(colour="orange", want=6, index=None):
                     pairs.append((cx, cy, wx, wy))
                     print(f"  [{len(pairs)}/{want}] px({cx:4d},{cy:4d}) "
                           f"-> world({wx:7.1f},{wy:7.1f})")
+                    # Persist after every pair. Collecting these is manual and
+                    # slow, and the session holds a robot connection open for
+                    # minutes while the user moves an object by hand -- a
+                    # dropped connection part-way through used to discard
+                    # every pair collected so far.
+                    PAIRS_PATH.write_text(json.dumps(
+                        {"colour": colour, "pairs": pairs}, indent=2))
                     stable_since = None
                     await asyncio.sleep(0.5)
 

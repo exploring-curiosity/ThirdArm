@@ -1,0 +1,87 @@
+:root {
+  --bg: #14161a;
+  --panel: #1c1f26;
+  --edge: #2b303b;
+  --text: #e7eaf0;
+  --dim: #8a93a6;
+  --ok: #5dd47f;
+  --warn: #ffb454;
+  --bad: #ff6b6b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.app { min-height: 100vh; display: flex; flex-direction: column; }
+
+.status {
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  padding: 12px 18px; background: var(--panel);
+  border-bottom: 1px solid var(--edge); position: sticky; top: 0; z-index: 5;
+}
+.status strong { font-size: 15px; letter-spacing: .3px; }
+.status.offline .warn { color: var(--bad); font-weight: 600; }
+.stats { display: flex; gap: 16px; flex-wrap: wrap; }
+.stat { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.stat .dot { width: 9px; height: 9px; border-radius: 3px; }
+.stat .label { color: var(--dim); }
+.stat .value { font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat .sub, .status .sub { color: var(--dim); font-size: 11px; }
+.state { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 99px; }
+.state.idle { color: var(--ok); background: #1d2a21; }
+.state.busy { color: var(--warn); background: #2e2418; }
+.selected { font-size: 12px; color: #ff9bff; }
+
+.controls { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 18px 6px; }
+.controls .spacer { flex: 1 1 24px; }
+button {
+  font: 600 13px inherit; color: #0d0f13; border: 0; border-radius: 8px;
+  padding: 11px 16px; cursor: pointer; transition: filter .12s, opacity .12s;
+}
+button:hover:not(:disabled) { filter: brightness(1.12); }
+button:disabled { opacity: .38; cursor: not-allowed; }
+button.stop { background: var(--bad); color: #fff; }
+button.ghost { background: #2b303b; color: var(--text); }
+
+.legend { display: flex; gap: 16px; flex-wrap: wrap; padding: 4px 18px 10px;
+          font-size: 12px; color: var(--dim); }
+.legend i { width: 11px; height: 11px; border-radius: 3px;
+            display: inline-block; vertical-align: -1px; margin-right: 6px; }
+
+.views {
+  display: grid; gap: 10px; padding: 0 10px 10px;
+  grid-template-columns: 1fr 1fr 0.68fr;
+}
+@media (max-width: 1500px) { .views { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 900px)  { .views { grid-template-columns: 1fr; } }
+.panel {
+  margin: 0; background: var(--panel); border: 1px solid var(--edge);
+  border-radius: 10px; overflow: hidden;
+}
+.panel figcaption {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 12px; letter-spacing: .6px; text-transform: uppercase;
+  color: var(--dim); padding: 8px 12px; border-bottom: 1px solid var(--edge);
+}
+.panel .hint { text-transform: none; letter-spacing: 0; font-size: 11px; opacity: .7; }
+.panel img { display: block; width: 100%; background: #000; }
+
+.log {
+  margin: 0 10px 14px; padding: 10px 12px; background: #0f1115;
+  border: 1px solid var(--edge); border-radius: 8px; height: 170px;
+  overflow: auto; color: #9fb0c9; white-space: pre-wrap;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Reconnecting: keep the last frame visible but obviously stale, rather than
+   collapsing the layout to a broken-image icon. The panel keeps its size, so
+   the page does not reflow every time a stream blinks. */
+.panel img.stale { opacity: 0.35; filter: grayscale(1); }
+.hint.offline { color: var(--bad); }
+
+/* Sort runs the whole table unattended, so it reads as the primary action. */
+button.sort { background: #2f6f4f; color: #fff; font-weight: 600; }
+button.sort:disabled { opacity: .45; }

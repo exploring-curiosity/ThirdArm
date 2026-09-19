@@ -3,3 +3,12 @@
 .venv/
 .claude/
 __pycache__/
+
+# Debug renders written by the perception scripts (auto_pose, pose3d,
+# build_planner, ...). Regenerated on every run; never worth committing.
+*_out.jpg
+*_out.png
+
+# React UI: dependencies and the Vite build output (rebuild with `cd ui && npm run build`)
+ui/node_modules/
+static/

@@ -39,7 +39,12 @@ from tutorial import connect, _decode_depth
 COLOURS = {
     "orange": ((0, 110, 80), (18, 255, 255), (0, 140, 255)),
     "yellow": ((20, 90, 90), (38, 255, 255), (0, 220, 240)),
-    "blue": ((95, 110, 70), (110, 255, 255), (255, 140, 0)),
+    # Widened 2026-09-19 to cover the blue drop box, a crumpled matte
+    # container the old band missed entirely (0 of 21000 sampled pixels
+    # matched). MEASURED on its face: H 114-119, S ~158, V ~64 -- past the
+    # old hue ceiling of 110 and below its value floor of 70. The wider band
+    # still has zero pixel overlap with orange or green in the same frame.
+    "blue": ((95, 80, 40), (125, 255, 255), (255, 140, 0)),
     "green": ((40, 80, 60), (85, 255, 255), (80, 220, 80)),
 }
 

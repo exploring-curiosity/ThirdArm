@@ -187,6 +187,13 @@ async def find_objects(machine, segmenter):
     """All segmented objects as (label, world centre Pose, dims), one read."""
     out = []
     for obj in await segmenter.get_object_point_clouds("cam"):
+        # The segmenter can return a point cloud with no geometry attached --
+        # a cluster it could not fit a box to. Indexing [0] blindly raised
+        # IndexError and killed the caller, which for seg_z_pump means losing
+        # the accurate z source mid-pick. Skip it instead: one unfittable
+        # cluster is not a reason to drop the rest of the read.
+        if not obj.geometries.geometries:
+            continue
         geo = obj.geometries.geometries[0]
         pif = await machine.transform_pose(
             PoseInFrame(reference_frame="cam", pose=geo.center), "world"

@@ -58,19 +58,38 @@ DETECTORS = {
 # detector returns one large blob rather than a compact cube, so it needs its
 # own size window and its own locate path.
 DROP_DETECTOR = "color-detector-green"
+# The blue drop box has its own detector on the machine, same naming.
+DROP_DETECTOR_BLUE = "color-detector-blue"
+DROP_DETECTORS = {"green": DROP_DETECTOR, "blue": DROP_DETECTOR_BLUE}
 DROP_BOX_MIN_PX, DROP_BOX_MAX_PX = 80, 500
 
 # Clearance above the green box's rim before opening the gripper. The carried
 # object hangs below the gripper origin, so this must exceed the object height.
 DROP_CLEARANCE_MM = 90.0
 
-# Half-width of a square exclusion zone around the drop box centre. A colour
-# detector can still fire on an object already sitting inside the box (seen
-# through the open top), and picking that up again would be wrong — either
-# it's already placed, or the arm would be reaching down inside the box walls.
-# Not yet measured against the physical box; tune if real objects near the
-# box's edge get excluded, or box-interior hits keep slipping through.
-BOX_EXCLUSION_RADIUS_MM = 90.0
+# Half-extents of the exclusion zone around the drop box centre. A detector
+# can still fire on an object already sitting inside the box (seen through the
+# open top), and picking that up again would be wrong — either it's already
+# placed, or the arm would be reaching down inside the box walls.
+#
+# MEASURED 2026-09-19 against the physical box (~147 x 276 mm, long axis along
+# world y). The previous single 90 mm square excluded only 1 of 5 objects a
+# SAM survey found inside the box: the rest sat 98-112 mm away in y, which is
+# outside a 90 mm square but well inside a 276 mm box. A square was always the
+# wrong shape for a rectangular box.
+#
+# Half-extents plus a small margin for the object's own width, since the
+# exclusion tests the object's centre.
+# The box's measured outside dimensions, used to quantify a clipped view.
+BOX_SHORT_MM = 147.0
+BOX_LONG_MM = 276.0
+
+BOX_EXCLUSION_X_MM = 90.0     # 147/2 = 73.5, rounded up
+BOX_EXCLUSION_Y_MM = 155.0    # 276/2 = 138, rounded up
+
+# Kept as the larger of the two so any external caller still importing this
+# name gets conservative behaviour rather than a NameError.
+BOX_EXCLUSION_RADIUS_MM = BOX_EXCLUSION_Y_MM
 
 # Stage 1: plausible on-screen size for a table-top object at ~680 mm.
 MIN_BOX_PX, MAX_BOX_PX = 25, 110
@@ -108,8 +127,8 @@ def in_workspace(p):
 def in_drop_box(p, drop):
     if drop is None:
         return False
-    return (abs(p.x - drop.x) < BOX_EXCLUSION_RADIUS_MM
-            and abs(p.y - drop.y) < BOX_EXCLUSION_RADIUS_MM)
+    return (abs(p.x - drop.x) < BOX_EXCLUSION_X_MM
+            and abs(p.y - drop.y) < BOX_EXCLUSION_Y_MM)
 
 
 async def candidates(machine, cam, detector, drop=None):
@@ -284,14 +303,27 @@ async def move_smooth(machine, motion, arm, target, label, min_z,
     return target
 
 
-async def locate_drop_box(machine, cam, frames=5):
+async def locate_drop_box(machine, cam, frames=5, which="green"):
     """Find the green drop box's top face in world coordinates.
 
     Separate from locate_colour: the box is large and its detector returns a
     single wide blob, so the compact-object size window does not apply.
+
+    KNOWN LIMITATION (measured 2026-09-19): at top-pose the box extends past
+    the bottom edge of the wrist camera's frame -- its bounding box runs to
+    y=719 of 720. The detector therefore sees only the upper part of the box,
+    and the centroid it reports is pulled toward the top rather than sitting
+    at the true centre. The reported position is repeatable to ~1 mm but
+    systematically offset; it is a viewing-geometry problem, not a detector
+    fault. A clipped detection is flagged in the printout so the offset is
+    visible rather than silent. Move the box fully into view, or raise the
+    survey pose, to remove it.
     """
-    detector = VisionClient.from_robot(machine, DROP_DETECTOR)
+    detector = VisionClient.from_robot(
+        machine, DROP_DETECTORS.get(which, DROP_DETECTOR))
     xs, ys, zs = [], [], []
+    clipped = []
+    boxes = []
 
     for _ in range(frames):
         detections = [
@@ -311,21 +343,43 @@ async def locate_drop_box(machine, cam, frames=5):
         images, _ = await cam.get_images(filter_source_names=["depth"])
         depth = _decode_depth(images[0].data)
         intr = (await cam.get_properties()).intrinsic_parameters
+        fh, fw = depth.shape[:2]
+        clipped.append(d.y_max >= fh - 2 or d.y_min <= 1
+                       or d.x_max >= fw - 2 or d.x_min <= 1)
+        boxes.append((d.x_min, d.y_min, d.x_max, d.y_max, fw, fh))
         patch = depth[d.y_min:d.y_max, d.x_min:d.x_max]
         valid = patch[patch > 0]
         if valid.size < 100:
             await asyncio.sleep(0.12)
             continue
 
+        # z from the NEAREST pixels, x/y from the BOUNDING BOX.
+        #
+        # These need different pixel sets, and using one set for both was a
+        # real error. The nearest 12.5% of depths correctly isolates the rim
+        # rather than the box floor -- that is the height to release above.
+        # But the rim is not seen symmetrically: the camera is off to one
+        # side, so the near wall reads closer than the far wall and those
+        # nearest pixels all cluster along one edge. Taking their centroid as
+        # the box's x/y therefore reports a point on the near rim, not the
+        # middle of the box.
+        #
+        # Simulated against the measured geometry (192x363 px bbox, 60 mm of
+        # depth across the box, 90 mm rim-to-floor): the 12.5% centroid lands
+        # 122 px from the true centre, about 93 mm. That is the drop-box
+        # offset.
+        #
+        # The detector's bounding box already localises the box in x/y and is
+        # symmetric by construction, so use its centre for position and keep
+        # the percentile strictly for height.
         cutoff = np.percentile(valid, 12.5)
         mask = (patch > 0) & (patch <= cutoff)
-        rows, cols = np.nonzero(mask)
-        if cols.size == 0:
+        if not mask.any():
             await asyncio.sleep(0.12)
             continue
         z_mm = float(patch[mask].mean())
-        px = float(cols.mean()) + d.x_min
-        py = float(rows.mean()) + d.y_min
+        px = 0.5 * (d.x_min + d.x_max)
+        py = 0.5 * (d.y_min + d.y_max)
         pif = await machine.transform_pose(
             PoseInFrame(
                 reference_frame="cam",
@@ -346,6 +400,54 @@ async def locate_drop_box(machine, cam, frames=5):
     if not xs:
         print("  green drop box not found")
         return None
+
+    if clipped and all(clipped):
+        # Say HOW clipped, not just that it is. The centroid of a clipped
+        # bbox sits at the middle of the VISIBLE part, so the error is
+        # roughly half the missing extent -- quantifying it turns "the drop
+        # box is off" into a number that can be checked against the box's
+        # known size.
+        x0, y0, x1, y1, fw, fh = boxes[-1]
+        seen_h = y1 - y0
+        edges = []
+        if y1 >= fh - 2:
+            edges.append("bottom")
+        if y0 <= 1:
+            edges.append("top")
+        if x1 >= fw - 2:
+            edges.append("right")
+        if x0 <= 1:
+            edges.append("left")
+        # BOX_LONG_MM spans the frame's y axis at this pose; scale pixels to
+        # mm with the visible fraction we do have.
+        # Touching the frame edge is not the same as being cut off. The
+        # box's aspect ratio says how much is actually missing: scale from
+        # whichever axis is NOT against an edge, then compare the other
+        # axis against its known length. Reporting "clipped" on a box that
+        # merely reaches the last row sent me looking for a viewing-geometry
+        # problem that was not there.
+        seen_w = x1 - x0
+        x_clipped = x1 >= fw - 2 or x0 <= 1
+        if not x_clipped and seen_w > 0:
+            mm_per_px = BOX_SHORT_MM / seen_w
+            expect_h = BOX_LONG_MM / mm_per_px
+            missing_mm = max(0.0, (expect_h - seen_h)) * mm_per_px
+        else:
+            missing_mm = float("nan")
+
+        if missing_mm == missing_mm and missing_mm < 10.0:
+            print(f"  note: the box reaches the {'/'.join(edges)} of the "
+                  f"frame but its full {BOX_LONG_MM:.0f} mm length is "
+                  f"visible (within {missing_mm:.0f} mm) — no clipping bias")
+        else:
+            amount = ("" if missing_mm != missing_mm
+                      else f" about {missing_mm:.0f} mm of it")
+            print(f"  WARNING: the box is cut off at the "
+                  f"{'/'.join(edges)} of the frame"
+                  f"{amount} (bbox {x0},{y0}-{x1},{y1} in {fw}x{fh}).")
+            print(f"           The centre is pulled toward the visible side "
+                  f"by roughly {0 if missing_mm != missing_mm else missing_mm/2:.0f} mm.")
+            print(f"           Move the box fully into view to remove this.")
 
     def mean(v):
         return sum(v) / len(v)
