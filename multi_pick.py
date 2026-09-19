@@ -29,7 +29,7 @@ from viam.proto.common import Pose, PoseInFrame
 from viam.services.motion import MotionClient
 from viam.services.vision import VisionClient
 
-from tutorial import connect, goto_saved_pose
+from tutorial import connect, goto_saved_pose, _decode_depth
 from pc_slow_pick import parse_point_cloud
 from slow_pick import interpolate
 from seg_pick import (
@@ -68,11 +68,23 @@ MIN_BOX_PX, MAX_BOX_PX = 25, 110
 
 # Stage 2: the physical workspace. Anything outside this is background.
 #
-# The y bounds are deliberately tight. Carpet on the floor reads as blue and
-# was passing a +/-400 mm window: false candidates clustered at y = +365..380
-# while every real object measured sits between y = -80 and +51. The table
-# itself does not extend past about +/-200 mm in y at the working distance.
-WORKSPACE = dict(x=(200.0, 700.0), y=(-200.0, 200.0), z=(20.0, 150.0))
+# Carpet on the floor reads as a coloured object and has to be rejected. It is
+# rejected by HEIGHT, not by y: the floor is well below the table, so a z floor
+# separates them wherever they sit on the table.
+#
+# Measured over 6 frames, every real object on the table came back between
+# z = 5.3 and 40.3, while floor blobs deproject negative (a green carpet blob
+# read z = -55.1). MIN_OBJECT_Z sits just below the table surface (z ~ 0) so a
+# low object still qualifies while the floor cannot.
+#
+# An earlier version restricted y to +/-200, fitted to where the objects
+# happened to sit. That rejected them as soon as they were moved, which is the
+# wrong failure mode — height is the property that actually distinguishes a
+# table object from the floor.
+MIN_OBJECT_Z = -15.0
+MAX_OBJECT_Z = 250.0
+WORKSPACE = dict(x=(150.0, 800.0), y=(-450.0, 450.0),
+                 z=(MIN_OBJECT_Z, MAX_OBJECT_Z))
 
 # Two candidate positions within this distance are treated as the same object
 # across frames.
@@ -111,27 +123,37 @@ async def candidates(machine, cam, detector):
     if not sized:
         return []
 
-    raw, _ = await cam.get_point_cloud()
-    cloud = parse_point_cloud(raw)
+    # Use the DEPTH MAP, not the point cloud. The cloud is the same data
+    # already deprojected: 14.7 MB and ~1.2 s per call against 1.8 MB and
+    # ~0.12 s for the depth map. Sampling 13 frames per pick made that a 3-4 s
+    # stall per locate, and the large transfers were also dropping the
+    # connection outright. Deprojecting locally costs 0.05 ms.
+    images, _ = await cam.get_images(filter_source_names=["depth"])
+    depth = _decode_depth(images[0].data)
+    intr = (await cam.get_properties()).intrinsic_parameters
 
     out = []
     for d in sized:
-        patch = cloud[d.y_min:d.y_max, d.x_min:d.x_max].ravel()
-        valid = patch[np.isfinite(patch['z']) & (patch['z'] != 0)]
+        patch = depth[d.y_min:d.y_max, d.x_min:d.x_max]
+        valid = patch[patch > 0]
         if valid.size < MIN_3D_POINTS:
             continue
-        depths = valid['z']
-        take = max(20, int(valid.size * TOP_FACE_FRACTION))
-        nearest = np.argsort(depths)[:take]
+        # Nearest points are the object's top face; the rest is its sides and
+        # the table showing through around its edges.
+        cutoff = np.percentile(valid, 100 * TOP_FACE_FRACTION)
+        mask = (patch > 0) & (patch <= cutoff)
+        ys, xs = np.nonzero(mask)
+        if xs.size == 0:
+            continue
+        z_mm = float(patch[mask].mean())
+        px = float(xs.mean()) + d.x_min
+        py = float(ys.mean()) + d.y_min
+        x_cam = (px - intr.center_x_px) * z_mm / intr.focal_x_px
+        y_cam = (py - intr.center_y_px) * z_mm / intr.focal_y_px
         pif = await machine.transform_pose(
             PoseInFrame(
                 reference_frame="cam",
-                pose=Pose(
-                    x=float(valid['x'][nearest].mean() * 1000),
-                    y=float(valid['y'][nearest].mean() * 1000),
-                    z=float(valid['z'][nearest].mean() * 1000),
-                    o_z=1,
-                ),
+                pose=Pose(x=x_cam, y=y_cam, z=z_mm, o_z=1),
             ),
             "world",
         )
@@ -286,22 +308,31 @@ async def locate_drop_box(machine, cam, frames=5):
 
         d = max(detections,
                 key=lambda x: (x.x_max - x.x_min) * (x.y_max - x.y_min))
-        raw, _ = await cam.get_point_cloud()
-        cloud = parse_point_cloud(raw)
-        patch = cloud[d.y_min:d.y_max, d.x_min:d.x_max].ravel()
-        valid = patch[np.isfinite(patch['z']) & (patch['z'] != 0)]
+        images, _ = await cam.get_images(filter_source_names=["depth"])
+        depth = _decode_depth(images[0].data)
+        intr = (await cam.get_properties()).intrinsic_parameters
+        patch = depth[d.y_min:d.y_max, d.x_min:d.x_max]
+        valid = patch[patch > 0]
         if valid.size < 100:
             await asyncio.sleep(0.12)
             continue
 
-        nearest = np.argsort(valid['z'])[:max(30, valid.size // 8)]
+        cutoff = np.percentile(valid, 12.5)
+        mask = (patch > 0) & (patch <= cutoff)
+        rows, cols = np.nonzero(mask)
+        if cols.size == 0:
+            await asyncio.sleep(0.12)
+            continue
+        z_mm = float(patch[mask].mean())
+        px = float(cols.mean()) + d.x_min
+        py = float(rows.mean()) + d.y_min
         pif = await machine.transform_pose(
             PoseInFrame(
                 reference_frame="cam",
                 pose=Pose(
-                    x=float(valid['x'][nearest].mean() * 1000),
-                    y=float(valid['y'][nearest].mean() * 1000),
-                    z=float(valid['z'][nearest].mean() * 1000),
+                    x=(px - intr.center_x_px) * z_mm / intr.focal_x_px,
+                    y=(py - intr.center_y_px) * z_mm / intr.focal_y_px,
+                    z=z_mm,
                     o_z=1,
                 ),
             ),

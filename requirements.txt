@@ -1,0 +1,5 @@
+viam-sdk
+python-dotenv
+opencv-python
+numpy
+pyobjc-framework-AVFoundation ; sys_platform == 'darwin'

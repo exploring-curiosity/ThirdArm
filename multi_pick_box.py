@@ -30,7 +30,7 @@ from viam.proto.common import Pose, PoseInFrame
 from viam.services.motion import MotionClient
 from viam.services.vision import VisionClient
 
-from tutorial import connect, goto_saved_pose
+from tutorial import connect, goto_saved_pose, _decode_depth
 from pc_slow_pick import parse_point_cloud
 from slow_pick import interpolate
 from seg_pick import (
@@ -305,22 +305,34 @@ async def locate_drop_box(machine, cam, frames=5):
 
         d = max(detections,
                 key=lambda x: (x.x_max - x.x_min) * (x.y_max - x.y_min))
-        raw, _ = await cam.get_point_cloud()
-        cloud = parse_point_cloud(raw)
-        patch = cloud[d.y_min:d.y_max, d.x_min:d.x_max].ravel()
-        valid = patch[np.isfinite(patch['z']) & (patch['z'] != 0)]
+        # Depth map, not point cloud: the cloud is the same data already
+        # deprojected but is 14.7 MB / ~1250 ms against 1.8 MB / ~120 ms.
+        # Five frames of it made this a ~6 s stall.
+        images, _ = await cam.get_images(filter_source_names=["depth"])
+        depth = _decode_depth(images[0].data)
+        intr = (await cam.get_properties()).intrinsic_parameters
+        patch = depth[d.y_min:d.y_max, d.x_min:d.x_max]
+        valid = patch[patch > 0]
         if valid.size < 100:
             await asyncio.sleep(0.12)
             continue
 
-        nearest = np.argsort(valid['z'])[:max(30, valid.size // 8)]
+        cutoff = np.percentile(valid, 12.5)
+        mask = (patch > 0) & (patch <= cutoff)
+        rows, cols = np.nonzero(mask)
+        if cols.size == 0:
+            await asyncio.sleep(0.12)
+            continue
+        z_mm = float(patch[mask].mean())
+        px = float(cols.mean()) + d.x_min
+        py = float(rows.mean()) + d.y_min
         pif = await machine.transform_pose(
             PoseInFrame(
                 reference_frame="cam",
                 pose=Pose(
-                    x=float(valid['x'][nearest].mean() * 1000),
-                    y=float(valid['y'][nearest].mean() * 1000),
-                    z=float(valid['z'][nearest].mean() * 1000),
+                    x=(px - intr.center_x_px) * z_mm / intr.focal_x_px,
+                    y=(py - intr.center_y_px) * z_mm / intr.focal_y_px,
+                    z=z_mm,
                     o_z=1,
                 ),
             ),
